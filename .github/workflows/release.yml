@@ -84,7 +84,7 @@ jobs:
 
       # Upload the compiled .node file so the publish job can collect them all.
       - name: Upload .node artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-${{ matrix.settings.target }}
           # The .node file is named bun-js-beforeparse.<target>.node by napi-rs.
@@ -117,7 +117,7 @@ jobs:
 
       # Download all .node files produced by the build matrix.
       - name: Download all .node artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # Download into the package root so npm pack picks them up.
           path: .
