@@ -183,9 +183,20 @@ The build produces `bun-js-beforeparse.<platform>.node` in the package root.
 
 ### Cross-compilation
 
-napi-rs handles cross-compilation automatically in CI via the
-[`napi-rs/action`](https://github.com/napi-rs/package-template) GitHub Action. For
-local cross-compilation, see the [napi-rs docs](https://napi.rs/docs/cross-build).
+The release workflow builds all targets using direct `napi build` commands:
+
+| Target | Method | Runner |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | `--use-napi-cross` | ubuntu-latest |
+| `x86_64-unknown-linux-musl` | `-x` (cargo-zigbuild + zig) | ubuntu-latest |
+| `aarch64-unknown-linux-gnu` | `--use-napi-cross` | ubuntu-latest |
+| `aarch64-unknown-linux-musl` | `-x` (cargo-zigbuild + zig) | ubuntu-latest |
+| `aarch64-apple-darwin` | native | macos-latest |
+| `x86_64-apple-darwin` | native (cross from arm64) | macos-latest |
+| `x86_64-pc-windows-msvc` | native | windows-latest |
+| `aarch64-pc-windows-msvc` | native (cross from x64) | windows-latest |
+
+For local cross-compilation, see the [napi-rs docs](https://napi.rs/docs/cross-build).
 
 ## How to publish
 
