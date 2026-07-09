@@ -1,0 +1,27 @@
+[package]
+name = "bun-js-beforeparse"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = C dynamic library → produces a .node file loadable as a NAPI module
+crate-type = ["cdylib"]
+
+[dependencies]
+# Bun's safe Rust wrapper over the onBeforeParse C ABI structs
+bun-native-plugin = "0.2"
+
+# napi-rs v2: well-documented TSFN API (ErrorStrategy, ThreadSafeCallContext)
+# napi4: enables ThreadsafeFunction
+# napi6: External type support
+napi = { version = "2", features = ["napi4", "napi6"] }
+napi-derive = "2"
+
+[build-dependencies]
+# Generates the correct linker flags for the .node shared library
+napi-build = "2"
+
+[profile.release]
+lto = true          # Link-time optimization: smaller .node, faster calls
+codegen-units = 1   # Single codegen unit → better optimization
+strip = "debuginfo" # Strip debug symbols from release build
