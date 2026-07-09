@@ -127,6 +127,32 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la *.node
 
+      # napi pre-publish expects .node files inside npm/<platform>/ dirs.
+      # Copy each .node from repo root into the correct directory.
+      - name: Copy .node files into npm platform directories
+        run: |
+          declare -A TARGET_MAP=(
+            ["x86_64-unknown-linux-gnu"]="linux-x64-gnu"
+            ["x86_64-unknown-linux-musl"]="linux-x64-musl"
+            ["aarch64-unknown-linux-gnu"]="linux-arm64-gnu"
+            ["aarch64-unknown-linux-musl"]="linux-arm64-musl"
+            ["x86_64-apple-darwin"]="darwin-x64"
+            ["aarch64-apple-darwin"]="darwin-arm64"
+            ["x86_64-pc-windows-msvc"]="win32-x64-msvc"
+            ["aarch64-pc-windows-msvc"]="win32-arm64-msvc"
+          )
+          for target in "${!TARGET_MAP[@]}"; do
+            dir="npm/${TARGET_MAP[$target]}"
+            file="bun-js-beforeparse.${TARGET_MAP[$target]}.node"
+            mkdir -p "$dir"
+            if [ -f "$file" ]; then
+              cp "$file" "$dir/"
+              echo "Copied $file → $dir/"
+            else
+              echo "WARNING: $file not found"
+            fi
+          done
+
       # napi pre-publish:
       #   1. Creates per-platform stub packages under npm/ (e.g. npm/linux-x64-gnu/)
       #   2. Updates package.json optionalDependencies to point at those stubs
