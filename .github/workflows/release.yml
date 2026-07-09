@@ -1,0 +1,150 @@
+name: Release
+
+# Trigger: push a semver tag (e.g. v0.1.0) or run manually from the Actions tab.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build but do not publish to npm)"
+        type: boolean
+        default: false
+
+# Required secrets:
+#   NPM_TOKEN  — npm automation token with publish access to the package
+
+jobs:
+  # ─── Build one .node binary per platform, in parallel ──────────────────────
+  build:
+    name: Build · ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            # musl cross-compile is handled by the zig cross-linker below
+            build: bun run build
+
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: bun run build
+            # Uses zig as the C linker for musl (provided by napi-rs/action)
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            zig: true
+
+          - host: macos-latest        # Apple Silicon (arm64)
+            target: aarch64-apple-darwin
+            build: bun run build
+
+          - host: macos-13            # Intel (x64)
+            target: x86_64-apple-darwin
+            build: bun run build
+
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: bun run build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      # napi-rs/action installs the correct Rust toolchain + cross-linker per target.
+      # On Linux musl it uses zig as the linker (no glibc).
+      - name: Build with napi-rs/action
+        uses: napi-rs/action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The target triple to compile for.
+          target: ${{ matrix.settings.target }}
+          # Build command — runs inside the correct cross-compile environment.
+          build-command: ${{ matrix.settings.build }}
+          # Use zig as the C cross-linker for musl targets.
+          zig: ${{ matrix.settings.zig == true && 'true' || 'false' }}
+
+      # Upload the compiled .node file so the publish job can collect them all.
+      - name: Upload .node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.settings.target }}
+          # The .node file is named bun-js-beforeparse.<target>.node by napi-rs.
+          path: "*.node"
+          if-no-files-found: error
+
+  # ─── Publish to npm after all builds succeed ────────────────────────────────
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: write   # needed to create a GitHub Release
+      id-token: write   # needed for npm provenance (--provenance flag)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node.js (for npm publish)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install deps (for napi CLI)
+        run: bun install
+
+      # Download all .node files produced by the build matrix.
+      - name: Download all .node artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Download into the package root so npm pack picks them up.
+          path: .
+          # Merge all artifact folders into the working directory.
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la *.node
+
+      # napi pre-publish:
+      #   1. Creates per-platform stub packages under npm/ (e.g. npm/linux-x64-gnu/)
+      #   2. Updates package.json optionalDependencies to point at those stubs
+      # This is required for the optional dependency install model napi-rs uses.
+      - name: Prepare platform packages (napi pre-publish)
+        run: bunx napi pre-publish --config package.json
+
+      # Publish each platform-specific stub package first.
+      - name: Publish platform packages
+        run: |
+          for dir in npm/*/; do
+            echo "Publishing $dir..."
+            cd "$dir"
+            npm publish --access public ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+            cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish the main package (which has optionalDependencies on the stubs).
+      - name: Publish main package
+        run: |
+          npm publish --access public ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Create a GitHub Release with the tag and a changelog note.
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Attach all .node binaries to the release for manual download.
+          files: "*.node"
+          generate_release_notes: true
+          fail_on_unmatched_files: false
