@@ -14,7 +14,7 @@ bun-native-plugin = "0.2"
 # napi-rs v2: well-documented TSFN API (ErrorStrategy, ThreadSafeCallContext)
 # napi4: enables ThreadsafeFunction
 # napi6: External type support
-napi = { version = "2", features = ["napi4", "napi6"] }
+napi = { version = "3", features = ["napi4", "napi6"] }
 napi-derive = "2"
 
 [build-dependencies]
