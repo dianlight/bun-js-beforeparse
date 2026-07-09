@@ -228,6 +228,11 @@ To test the publish without actually publishing:
 2. Check "Dry run"
 3. The workflow will build and run `npm publish --dry-run` for all packages
 
+## Sponsor
+
+<a href="https://github.com/sponsors/dianlight"><img src="https://img.shields.io/github/sponsors/dianlight?style=flat-square&logo=githubsponsors&logoColor=%23EA4AAA" alt="Github Sponsor"></a>
+<a href="https://www.buymeacoffee.com/ypKZ2I0"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=&slug=ypKZ2I0" alt="Buy Me a Coffee"/></a>
+
 ## Contributing
 
 Issues and PRs welcome. The Rust source is in `src/lib.rs`; the TypeScript wrapper is
