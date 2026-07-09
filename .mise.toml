@@ -5,6 +5,7 @@ min_version = "2024.1.0"
 rust = "stable"
 node = "lts"
 bun = "1.3"
+zig = "latest"
 
 # Add node_modules/.bin to PATH so `napi` is available directly.
 [env]

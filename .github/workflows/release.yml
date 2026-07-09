@@ -77,7 +77,7 @@ jobs:
 
       - name: Setup zig (for musl builds)
         if: contains(matrix.settings.target, 'musl')
-        uses: mwilli00/setup-zig@v1
+        uses: xyzzylabs/setup-zig@v1
 
       - name: Build
         run: ${{ matrix.settings.build }}
