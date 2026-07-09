@@ -26,42 +26,31 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: bun run build
+            build: bunx napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross
 
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            build: bun run build
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
-            zig: true
+            build: bunx napi build --platform --release --target x86_64-unknown-linux-musl -x
 
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            build: bun run build
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts
-            zig: true
+            build: bunx napi build --platform --release --target aarch64-unknown-linux-gnu --use-napi-cross
 
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            build: bun run build
-            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
-            zig: true
+            build: bunx napi build --platform --release --target aarch64-unknown-linux-musl -x
 
           - host: macos-latest        # Apple Silicon (arm64)
             target: aarch64-apple-darwin
-            build: bun run build
-
-          - host: macos-13            # Intel (x64)
-            target: x86_64-apple-darwin
-            build: bun run build
+            build: bunx napi build --platform --release --target aarch64-apple-darwin
 
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: bun run build
+            build: bunx napi build --platform --release --target x86_64-pc-windows-msvc
 
           - host: windows-latest
             target: aarch64-pc-windows-msvc
-            build: bun run build
-            # Cross-compile Windows ARM from x64 Windows runner
+            build: bunx napi build --platform --release --target aarch64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
@@ -69,19 +58,21 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      # napi-rs/action installs the correct Rust toolchain + cross-linker per target.
-      # On Linux musl it uses zig as the linker (no glibc).
-      - name: Build with napi-rs/action
-        uses: napi-rs/action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          # The target triple to compile for.
-          target: ${{ matrix.settings.target }}
-          # Build command — runs inside the correct cross-compile environment.
-          build-command: ${{ matrix.settings.build }}
-          # Use zig as the C cross-linker for musl targets.
-          zig: ${{ matrix.settings.zig == true && 'true' || 'false' }}
+          targets: ${{ matrix.settings.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.settings.target }}
+
+      - name: Install bun deps
+        run: bun install
+
+      - name: Build
+        run: ${{ matrix.settings.build }}
 
       # Upload the compiled .node file so the publish job can collect them all.
       - name: Upload .node artifact
