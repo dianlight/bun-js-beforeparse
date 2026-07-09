@@ -19,12 +19,16 @@ bun add bun-js-beforeparse
 
 Pre-built `.node` binaries are included for:
 
-| Platform | Architecture |
-|---|---|
-| Linux | x64 (glibc) |
-| macOS | x64 (Intel) |
-| macOS | arm64 (Apple Silicon) |
-| Windows | x64 (MSVC) |
+| Platform | Architecture | Target |
+|---|---|---|
+| Linux | x64 (glibc) | `x86_64-unknown-linux-gnu` |
+| Linux | x64 (musl) | `x86_64-unknown-linux-musl` |
+| Linux | arm64 (glibc) | `aarch64-unknown-linux-gnu` |
+| Linux | arm64 (musl) | `aarch64-unknown-linux-musl` |
+| macOS | x64 (Intel) | `x86_64-apple-darwin` |
+| macOS | arm64 (Apple Silicon) | `aarch64-apple-darwin` |
+| Windows | x64 (MSVC) | `x86_64-pc-windows-msvc` |
+| Windows | arm64 (MSVC) | `aarch64-pc-windows-msvc` |
 
 ## Quick start
 
@@ -152,12 +156,22 @@ Key design decisions:
 
 ## Building from source
 
-Requires: Rust (1.70+), [napi-rs CLI](https://napi.rs/docs/introduction/getting-started)
+Requires: Rust (stable), Bun (1.3+), [napi-rs CLI](https://napi.rs/docs/introduction/getting-started)
+
+### Quick setup with mise
 
 ```sh
-# Install napi-rs CLI
-bun add -g @napi-rs/cli
+# Install all toolchains (Rust, Bun, Node)
+mise install
 
+# Install npm deps + build + test
+mise run setup
+mise run check
+```
+
+### Manual setup
+
+```sh
 # Debug build (for development)
 bun run build:debug
 
@@ -170,8 +184,49 @@ The build produces `bun-js-beforeparse.<platform>.node` in the package root.
 ### Cross-compilation
 
 napi-rs handles cross-compilation automatically in CI via the
-[`@napi-rs/action`](https://github.com/napi-rs/package-template) GitHub Action. For
+[`napi-rs/action`](https://github.com/napi-rs/package-template) GitHub Action. For
 local cross-compilation, see the [napi-rs docs](https://napi.rs/docs/cross-build).
+
+## How to publish
+
+Releases are automated via GitHub Actions. Push a semver tag to trigger a full build
+across all 8 platforms and publish to npm.
+
+### Prerequisites
+
+1. Set the `NPM_TOKEN` secret in your GitHub repo settings
+   (Settings → Secrets → Actions → New repository secret)
+2. Ensure you have npm publish access to the `bun-js-beforeparse` package
+
+### Publish a release
+
+```sh
+# Bump version in package.json, then:
+git tag v0.1.0
+git push --tags
+```
+
+This triggers the release workflow which:
+
+1. Builds `.node` binaries for all 8 platforms in parallel
+2. Runs `napi pre-publish` to create per-platform stub packages under `npm/`
+3. Publishes each platform stub to npm (e.g. `@bun-js-beforeparse/linux-x64-gnu`)
+4. Publishes the main `bun-js-beforeparse` package with `optionalDependencies`
+5. Creates a GitHub Release with the binaries attached
+
+### How npm installation works
+
+When a user runs `npm install bun-js-beforeparse`, npm automatically installs only
+the matching platform stub. For example, on Linux x64 it installs `@bun-js-beforeparse/linux-x64-gnu`.
+The main package's `optionalDependencies` field drives this behavior.
+
+### Dry run
+
+To test the publish without actually publishing:
+
+1. Go to Actions → Release → Run workflow
+2. Check "Dry run"
+3. The workflow will build and run `npm publish --dry-run` for all packages
 
 ## Contributing
 
