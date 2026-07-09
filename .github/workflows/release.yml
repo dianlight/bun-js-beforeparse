@@ -153,12 +153,14 @@ jobs:
             fi
           done
 
-      # napi pre-publish:
-      #   1. Creates per-platform stub packages under npm/ (e.g. npm/linux-x64-gnu/)
-      #   2. Updates package.json optionalDependencies to point at those stubs
-      # This is required for the optional dependency install model napi-rs uses.
+      # Step 1: Create stub directories with package.json for each platform.
+      # Step 2: Copy .node files (already done above).
+      # Step 3: napi pre-publish updates versions, optionalDependencies, and publishes stubs.
+      - name: Create npm stub directories
+        run: bunx napi create-npm-dirs
+
       - name: Prepare platform packages (napi pre-publish)
-        run: bunx napi pre-publish --no-gh-release
+        run: bunx napi pre-publish --no-gh-release --tag-style npm
 
       # Publish each platform-specific stub package first.
       - name: Publish platform packages
