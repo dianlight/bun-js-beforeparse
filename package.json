@@ -15,7 +15,7 @@
   "keywords": ["bun", "bundler", "plugin", "napi", "transform", "onBeforeParse"],
   "napi": {
     "binaryName": "bun-js-beforeparse",
-    "packageName": "@bun-js-beforeparse",
+    "packageName": "bun-js-beforeparse",
     "targets": [
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-linux-musl",
