@@ -26,13 +26,23 @@ jobs:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            # musl cross-compile is handled by the zig cross-linker below
             build: bun run build
 
           - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build: bun run build
-            # Uses zig as the C linker for musl (provided by napi-rs/action)
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
+            zig: true
+
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: bun run build
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts
+            zig: true
+
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: bun run build
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-alpine
             zig: true
 
@@ -47,6 +57,11 @@ jobs:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             build: bun run build
+
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+            build: bun run build
+            # Cross-compile Windows ARM from x64 Windows runner
 
     steps:
       - uses: actions/checkout@v4

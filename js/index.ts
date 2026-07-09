@@ -48,17 +48,20 @@ const _require = createRequire(import.meta.url);
 // Try the local .node first (development), then the package root (installed).
 let native: ReturnType<typeof _require>;
 try {
-  native = _require("../bun-js-beforeparse.linux-x64-gnu.node");
+  const p = process.platform === "win32" ? "win32" : process.platform;
+  const a = process.arch;
+  const suffix =
+    p === "linux"
+      ? `linux-${a}-gnu`
+      : p === "darwin"
+        ? `darwin-${a}`
+        : p === "win32"
+          ? `win32-${a}-msvc`
+          : null;
+  if (!suffix) throw new Error(`Unsupported platform: ${p}-${a}`);
+  native = _require(`../bun-js-beforeparse.${suffix}.node`);
 } catch {
-  try {
-    native = _require("../bun-js-beforeparse.darwin-arm64.node");
-  } catch {
-    try {
-      native = _require("../bun-js-beforeparse.darwin-x64.node");
-    } catch {
-      native = _require("bun-js-beforeparse");
-    }
-  }
+  native = _require("bun-js-beforeparse");
 }
 
 /**

@@ -1,3 +1,4 @@
 node_modules
 target
 bun-js-*.node
+.mise.local
