@@ -132,7 +132,7 @@ jobs:
       #   2. Updates package.json optionalDependencies to point at those stubs
       # This is required for the optional dependency install model napi-rs uses.
       - name: Prepare platform packages (napi pre-publish)
-        run: bunx napi pre-publish -c package.json
+        run: bunx napi pre-publish
 
       # Publish each platform-specific stub package first.
       - name: Publish platform packages
