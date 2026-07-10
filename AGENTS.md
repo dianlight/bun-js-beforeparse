@@ -2,7 +2,7 @@
 
 ## What this is
 
-Rust + TypeScript NAPI module (napi-rs v2) that exposes Bun's `onBeforeParse` hook as a JS-friendly `jsBridge()` API. Lets users write bundler transforms in plain TS without per-project Rust code.
+Rust + TypeScript NAPI module (napi-rs v3) that exposes Bun's `onBeforeParse` hook as a JS-friendly `jsBridge()` API. Lets users write bundler transforms in plain TS without per-project Rust code.
 
 ## Architecture (two files matter)
 
@@ -37,7 +37,7 @@ Transform functions **must not** await anything requiring the JS event loop to t
 
 - `releaseBridge()` is required after one-shot `Bun.build()` calls or the process never exits. Not needed with `Bun.serve()` (event loop stays alive).
 - The TSFN uses `CalleeHandled` strategy — the native callback receives `(null, source, path)` per Node error-first convention. The JS wrapper strips the leading null so `TransformFn` sees `(source, path)`.
-- `External::inner_from_raw(ptr)` must be used (not direct casting) — napi v2 External wraps data in a `TaggedObject`; direct casts segfault.
+- `External::inner_from_raw(ptr)` must be used (not direct casting) — napi v3 External wraps data in a `TaggedObject`; direct casts segfault.
 - `catch_unwind` around the `extern "C"` hook prevents Rust panics from crashing Bun — original source is returned unchanged on panic.
 - The `.node` binary output name comes from `package.json` → `napi.binaryName` (currently `bun-js-beforeparse`). Platform suffix is appended by `napi build --platform`.
 
