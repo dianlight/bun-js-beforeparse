@@ -32,7 +32,7 @@ use napi::threadsafe_function::{
     ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
 };
 use napi::bindgen_prelude::{FnArgs, *};
-use napi::Env;
+use napi::{Env, ValueType};
 use napi_derive::napi;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ use napi_derive::napi;
 pub struct BridgeFn {
     tsfn: ThreadsafeFunction<
         (String, String),
-        String,
+        Unknown<'static>,
         FnArgs<(String, String)>,
         napi::Status,
         false,   // CalleeHandled=false: no null error-first arg
@@ -79,10 +79,12 @@ unsafe impl Sync for BridgeFn {}
 /// Bun hands this pointer back to `bun_js_bridge_dispatch` on every file.
 ///
 /// Uses napi-rs v3's Function builder. The JS callback is called as fn(source, path)
-/// with callee_handled=false (no null error-first arg). Return type is String.
+/// with callee_handled=false (no null error-first arg). Return type is String (sync)
+/// or Promise<String> (async) — both are accepted; the dispatch hook inspects the
+/// runtime type and wires Promise results back via .then()/.catch().
 #[napi]
 pub fn create_bridge(
-    callback: Function<(String, String), String>,
+    callback: Function<(String, String), Unknown<'static>>,
 ) -> Result<External<Arc<BridgeFn>>> {
     let tsfn = callback
         .build_threadsafe_function::<(String, String)>()
@@ -213,20 +215,56 @@ fn dispatch_inner(
     // call_with_return_value in napi-rs v3:
     //   1. Posts (source, path) tuple to the TSFN → build_callback spreads it into two
     //      positional JS call args: fn(source, path).
-    //   2. napi-rs calls the JS callback. Return = String.
-    //   3. Closure is called on the JS thread with Result<String>:
-    //      Ok(s)  → JS returned a string; send it through the channel.
-    //      Err(e) → JS threw or non-string return; fall back to original source.
+    //   2. napi-rs calls the JS callback. Return = Unknown (accepts String or Promise).
+    //   3. Closure is called on the JS thread with Result<Unknown>:
+    //      Ok(String)  → sync function; extract and send through the channel.
+    //      Ok(Promise) → async function; wire .then()/.catch() so the result reaches
+    //                    the blocked worker thread after microtask resolution.
+    //      Err(e)      → JS threw; fall back to original source.
     //
     // v3 TSFN is Send+Sync; call_with_return_value takes &self — no Mutex needed.
     // callee_handled=false → pass the tuple directly (no Result/Ok() wrapping).
     bridge.tsfn.call_with_return_value(
         (source, path),
         ThreadsafeFunctionCallMode::Blocking,
-        // v3 closure: FnOnce(Result<Return>, Env) -> Result<()>. _env unused here.
-        move |ret: Result<String>, _env: Env| -> Result<()> {
+        // Return type is Unknown<'static> so both sync (String) and async (Promise)
+        // returns are accepted. We inspect the type at runtime and branch accordingly.
+        move |ret: Result<Unknown<'static>, napi::Status>, _env: Env| -> Result<()> {
             match ret {
-                Ok(s) => { let _ = tx.send(s); }
+                Ok(value) => {
+                    let value_type = value.get_type()?;
+                    if value_type == ValueType::String {
+                        // Sync path — extract the string and send it directly.
+                        let s: String = unsafe { value.cast::<napi::JsString>()? }
+                                .into_utf8()?
+                                .as_str()?
+                                .to_string();
+                        let _ = tx.send(s);
+                    } else {
+                        // Async path — the JS function returned a Promise.
+                        // Use PromiseRaw to wire up .then()/.catch() so the resolved
+                        // value reaches the channel after microtask resolution.
+                        // (CPU-only async is safe; event-loop-bound async will deadlock.)
+                        let tx_resolve = tx.clone();
+                        let tx_reject = tx.clone();
+                        let promise: PromiseRaw<'_, String> = unsafe { value.cast()? };
+                        if let Err(e) = promise
+                            .then(move |ctx: CallbackContext<String>| {
+                                let _ = tx_resolve.send(ctx.value);
+                                Ok(())
+                            })
+                            .and_then(|p| {
+                                p.catch(move |_ctx: CallbackContext<Unknown>| {
+                                    let _ = tx_reject.send(String::new());
+                                    Ok(())
+                                })
+                            })
+                        {
+                            eprintln!("[bun-js-beforeparse] Failed to wire promise callbacks: {e}");
+                            let _ = tx.send(String::new());
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("[bun-js-beforeparse] JS transform failed: {e}");
                     let _ = tx.send(String::new()); // empty = keep original source

@@ -17,9 +17,11 @@ export declare function bunPluginRegister(): void
  * Bun hands this pointer back to `bun_js_bridge_dispatch` on every file.
  *
  * Uses napi-rs v3's Function builder. The JS callback is called as fn(source, path)
- * with callee_handled=false (no null error-first arg). Return type is String.
+ * with callee_handled=false (no null error-first arg). Return type is String (sync)
+ * or Promise<String> (async) — both are accepted; the dispatch hook inspects the
+ * runtime type and wires Promise results back via .then()/.catch().
  */
-export declare function createBridge(callback: (arg: [string, string]) => string): ExternalObject<BridgeFn>
+export declare function createBridge(callback: (arg: [string, string]) => unknown): ExternalObject<BridgeFn>
 
 /**
  * Call this after your build completes if you need explicit cleanup.

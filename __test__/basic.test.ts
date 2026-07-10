@@ -10,7 +10,7 @@
  * to actually call the native hook — tested manually via the POC.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { createRequire } from "module";
 import { writeFileSync, mkdirSync, rmSync } from "fs";
 
@@ -56,7 +56,7 @@ describe("native module", () => {
 });
 
 // Import at module level (top-level await works in ESM / Bun test runner)
-import { jsBridge } from "../js/index.ts";
+import { jsBridge, releaseBridge } from "../js/index.ts";
 
 describe("jsBridge() TypeScript wrapper", () => {
 
@@ -112,15 +112,40 @@ async function buildWithBridge(
   return result;
 }
 
+// ─── Warmup: first Bun.build() with onBeforeParse needs native init ──────────
+// Without this, the first real test silently gets the original source back
+// because the native plugin system hasn't finished initializing yet.
+
+beforeAll(async () => {
+  const warmupPath = createTmpFile("_warmup.ts", "export const warmup = true;");
+  await Bun.build({
+    entrypoints: [warmupPath],
+    target: "browser",
+    plugins: [
+      {
+        name: "warmup-bridge",
+        setup(build) {
+          build.onBeforeParse(
+            { filter: /\.ts$/, namespace: "file" },
+            jsBridge((source) => `// warmup\n${source}`),
+          );
+        },
+      },
+    ],
+  });
+});
+
 // ─── Sync transform tests ────────────────────────────────────────────────────
 
 describe("jsBridge sync transform", () => {
   test("transforms source through Bun.build and output contains result", async () => {
     const sentinel = "SYNC_TRANSFORM_ACTIVE";
     const result = await buildWithBridge(
-      `export const x = 1;`,
+      `export const marker = "PLACEHOLDER";`,
       "sync-test.ts",
-      (source) => `// ${sentinel}\n${source}`,
+      // Modify an exported value so Bun's tree-shaker keeps the result.
+      // Prepended unused vars and // comments are stripped by the bundler.
+      (source) => source.replace("PLACEHOLDER", sentinel),
     );
 
     expect(result.success).toBe(true);
@@ -128,6 +153,7 @@ describe("jsBridge sync transform", () => {
 
     const bundle = await result.outputs[0].text();
     expect(bundle).toContain(sentinel);
+    expect(bundle).not.toContain("PLACEHOLDER");
   });
 
   test("receives correct source and path arguments", async () => {
@@ -178,12 +204,13 @@ describe("jsBridge async transform", () => {
   test("transforms source through Bun.build with async function", async () => {
     const sentinel = "ASYNC_TRANSFORM_ACTIVE";
     const result = await buildWithBridge(
-      `export const x = 1;`,
+      `export const marker = "PLACEHOLDER";`,
       "async-test.ts",
       async (source) => {
         // Simulate CPU-only async work (microtask resolution — safe for bridge)
         await Promise.resolve();
-        return `// ${sentinel}\n${source}`;
+        // Modify an exported value so Bun's tree-shaker keeps the result.
+        return source.replace("PLACEHOLDER", sentinel);
       },
     );
 
@@ -192,6 +219,7 @@ describe("jsBridge async transform", () => {
 
     const bundle = await result.outputs[0].text();
     expect(bundle).toContain(sentinel);
+    expect(bundle).not.toContain("PLACEHOLDER");
   });
 
   test("async transform receives correct source and path", async () => {
@@ -215,18 +243,20 @@ describe("jsBridge async transform", () => {
 
   test("async transform with chained microtasks resolves correctly", async () => {
     const result = await buildWithBridge(
-      `export const chain = 1;`,
+      `export const msg = "original";`,
       "async-chain-test.ts",
       async (source) => {
         const a = await Promise.resolve("FIRST");
         const b = await Promise.resolve("SECOND");
-        return `// ${a}_${b}\n${source}`;
+        // In-place replacement survives Bun's comment stripping.
+        return source.replace("original", `${a}_${b}`);
       },
     );
 
     expect(result.success).toBe(true);
     const bundle = await result.outputs[0].text();
     expect(bundle).toContain("FIRST_SECOND");
+    expect(bundle).not.toContain("original");
   });
 });
 
