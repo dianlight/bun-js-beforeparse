@@ -1,6 +1,6 @@
 {
   "name": "bun-js-beforeparse",
-  "version": "0.1.0",
+  "version": "0.2.0"
   "description": "Use any JavaScript/TypeScript function as a Bun bundler onBeforeParse plugin",
   "main": "js/index.js",
   "types": "js/index.d.ts",

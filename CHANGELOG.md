@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.2.0] - 2026-07-10
+
+### Added
+
 - End-to-end `Bun.build()` tests for both sync and async transforms in `__test__/basic.test.ts` (7 new tests: 4 sync, 3 async). The test suite now invokes the full `onBeforeParse` round-trip and asserts that the transformed source appears in the bundle.
 - `beforeAll` warmup build in the test suite — the first `Bun.build()` with a native `onBeforeParse` plugin needs native-plugin initialization; without a warmup, the first real test silently receives the original source.
 - Cleanup test that removes the `/tmp/bun-js-beforeparse-test` scratch directory after the suite runs.
