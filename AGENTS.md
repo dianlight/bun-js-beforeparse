@@ -11,6 +11,10 @@ Rust + TypeScript NAPI module (napi-rs v3) that exposes Bun's `onBeforeParse` ho
 
 The `.node` binary is loaded via a try/catch cascade: `linux-x64-gnu` → `darwin-arm64` → `darwin-x64` → fallback to package require.
 
+## Release workflow gotcha
+
+`napi pre-publish` only publishes the 8 platform stub packages (e.g. `bun-js-beforeparse-linux-x64-gnu`). It does **not** publish the root `bun-js-beforeparse` package. The release workflow must include a separate `npm publish --provenance --access public` step for the root package, placed after `napi pre-publish` and before `action-gh-release`.
+
 ## Commands
 
 ```sh
