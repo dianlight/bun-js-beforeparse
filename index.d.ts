@@ -22,14 +22,11 @@ export declare function bunPluginRegister(): void
 export declare function createBridge(callback: (arg: [string, string]) => string): ExternalObject<BridgeFn>
 
 /**
- * Call this after your build completes to release the TSFN reference, allowing
- * the event loop to exit. Without this, the process hangs waiting for more calls.
- *
  * Call this after your build completes if you need explicit cleanup.
  *
  * With Weak=true (set in create_bridge), the TSFN does not hold a strong event-loop
- * reference — the process can exit freely once the event loop drains. This function
- * exists for API compatibility and as a documentation anchor; it is a no-op.
+ * reference — the process exits freely once the event loop drains. This function
+ * exists for API compatibility; it is a no-op in napi-rs v3.
  *
  * In napi v3, External parameters are received as `&External<T>` (borrowed from JS heap).
  */
