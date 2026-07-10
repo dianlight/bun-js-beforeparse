@@ -12,18 +12,16 @@
 //!   ─────────────────                       ─────────────────
 //!   bun_js_bridge_dispatch()                TSFN callback fires
 //!     creates SyncChannel(0)                  calls user's JS fn (sync or async)
-//!     posts { source, path, tx } via TSFN     gets the String result
+//!     posts (source, path) via TSFN           gets the String result
 //!     blocks on rx.recv()                     sender.send(result)
 //!     writes result → OnBeforeParseResult
-//!
-//! Multiple worker threads block independently — each has its own channel pair.
 
 #![deny(clippy::all)]
 #![allow(clippy::missing_safety_doc)]
 
 use std::ffi::c_void;
 use std::panic;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 
 use bun_native_plugin::{define_bun_plugin, OnBeforeParse};
 
@@ -31,37 +29,44 @@ use bun_native_plugin::{define_bun_plugin, OnBeforeParse};
 // Without this, build.onBeforeParse() throws "must be a Napi module which exports BUN_PLUGIN_NAME".
 define_bun_plugin!("bun-js-beforeparse");
 use napi::threadsafe_function::{
-    ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
+    ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
 };
-use napi::{bindgen_prelude::*, Env, JsFunction, JsUnknown};
+use napi::bindgen_prelude::{FnArgs, *};
+use napi::{Env, ValueType};
 use napi_derive::napi;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-/// Payload sent from a Bun worker thread → JS main thread via the TSFN.
-/// Note: `tx` is NOT used in the TSFN setup closure — it's moved into the
-/// `call_with_return_value` callback that runs on the JS thread after the user's
-/// function returns. See dispatch_inner() for the full flow.
-struct BridgePayload {
-    source: String,
-    path: String,
-}
-
-// SAFETY: BridgePayload crosses thread boundaries via TSFN — all fields are Send.
-unsafe impl Send for BridgePayload {}
-
-/// Holds the ThreadsafeFunction behind a Mutex so release_bridge can call unref(&mut self).
-/// Wrapped in Arc so the extern "C" hook can use it from concurrent worker threads.
+/// Holds the ThreadsafeFunction wrapped in Arc so the extern "C" hook can use
+/// it from concurrent worker threads.
 ///
-/// Uses ErrorStrategy::CalleeHandled (the default from create_threadsafe_function).
-/// IMPORTANT: CalleeHandled prepends a null "error" arg following Node.js convention,
-/// so the JS callback receives (null, source, path). The JS wrapper in index.ts handles
-/// this by wrapping: (_err, source, path) => userFn(source, path).
+/// In napi-rs v3, ThreadsafeFunction<T> is Clone + Send + Sync natively, so no
+/// Mutex is needed — call_with_return_value takes &self.
+///
+/// Generic parameters:
+///   T                = (String, String)         →  (source, path) posted from worker threads
+///   Return           = String                   →  JS callback return value ('static required)
+///   CallJsBackArgs   = FnArgs<(String, String)> →  spreads the tuple into 2 positional JS args
+///                                                   (plain (String,String) would be one arg)
+///   const CalleeHandled = false  →  JS called as fn(source, path) directly, no null prefix
+///   const Weak          = true   →  does not prevent process exit (weak reference)
+///   const MaxQueueSize  = 0      →  unlimited queue
+///
+/// Using Weak=true means release_bridge() can be a no-op — the process exits naturally
+/// once the event loop drains. For Bun.serve() (long-running) this is ideal; for Bun.build()
+/// one-shot builds the process exits quickly after the build completes regardless.
 pub struct BridgeFn {
-    tsfn: Mutex<ThreadsafeFunction<BridgePayload, ErrorStrategy::CalleeHandled>>,
+    tsfn: ThreadsafeFunction<
+        (String, String),
+        Unknown<'static>,
+        FnArgs<(String, String)>,
+        napi::Status,
+        false,   // CalleeHandled=false: no null error-first arg
+        true,    // Weak=true: does not hold event loop open
+    >,
 }
 
-// SAFETY: ThreadsafeFunction is Send+Sync per napi-rs.
+// SAFETY: ThreadsafeFunction in napi-rs v3 is Send+Sync; Arc<BridgeFn> is Send+Sync.
 unsafe impl Send for BridgeFn {}
 unsafe impl Sync for BridgeFn {}
 
@@ -72,64 +77,49 @@ unsafe impl Sync for BridgeFn {}
 /// Returns `External<Arc<BridgeFn>>` — an opaque value passed as `external` in
 /// `build.onBeforeParse(matcher, { napiModule, symbol, external })`.
 /// Bun hands this pointer back to `bun_js_bridge_dispatch` on every file.
+///
+/// Uses napi-rs v3's Function builder. The JS callback is called as fn(source, path)
+/// with callee_handled=false (no null error-first arg). Return type is String (sync)
+/// or Promise<String> (async) — both are accepted; the dispatch hook inspects the
+/// runtime type and wires Promise results back via .then()/.catch().
 #[napi]
 pub fn create_bridge(
-    env: Env,
-    callback: JsFunction,
+    callback: Function<(String, String), Unknown<'static>>,
 ) -> Result<External<Arc<BridgeFn>>> {
-    // Build a ThreadsafeFunction<BridgePayload, Fatal>.
-    // The closure runs on the JS thread and converts the payload into call arguments.
-    // Fatal means any error in the closure terminates via panic (we handle errors below).
-    let tsfn: ThreadsafeFunction<BridgePayload, ErrorStrategy::CalleeHandled> = env
-        .create_threadsafe_function(
-            &callback,
-            0, // queue size 0 = unlimited; each call blocks the worker anyway
-            |ctx: ThreadSafeCallContext<BridgePayload>| -> Result<Vec<String>> {
-                // Build JS args: (source: string, path: string)
-                // Return Vec<String> — String implements ToNapiValue in napi v2,
-                // and napi-rs will create the JS strings during the actual call.
-                Ok(vec![ctx.value.source.clone(), ctx.value.path.clone()])
+    let tsfn = callback
+        .build_threadsafe_function::<(String, String)>()
+        // callee_handled::<false> = JS callback receives (source, path) directly.
+        // No null error-first arg is prepended. js/index.ts passes fn through unchanged.
+        .callee_handled::<false>()
+        .weak::<true>()             // weak ref: does not prevent process exit by itself
+        .max_queue_size::<0>()      // unlimited queue; each call blocks the worker anyway
+        .build_callback(
+            |ctx: ThreadsafeCallContext<(String, String)>| -> Result<FnArgs<(String, String)>> {
+                // ctx.value is the (source, path) tuple posted from the worker thread.
+                // FnArgs wraps the tuple so JsValuesTupleIntoVec spreads it into two
+                // separate positional JS args: fn(source, path).
+                // A plain (String, String) return would pass ONE tuple-object arg instead.
+                Ok(FnArgs { data: ctx.value })
             },
         )?;
 
-    // Wrap in Arc<BridgeFn> (BridgeFn holds a Mutex<TSFN>) so dispatch can be called
-    // from concurrent worker threads without needing exclusive ownership.
-    Ok(External::new(Arc::new(BridgeFn { tsfn: Mutex::new(tsfn) })))
+    // Wrap in Arc<BridgeFn> so dispatch can be called from concurrent worker threads.
+    Ok(External::new(Arc::new(BridgeFn { tsfn })))
 }
 
-/// Call this after your build completes to release the TSFN reference, allowing
-/// the event loop to exit. Without this, the process hangs waiting for more calls.
+/// Call this after your build completes if you need explicit cleanup.
 ///
-/// Consumes the External. After this call, do not pass the external to onBeforeParse.
+/// With Weak=true (set in create_bridge), the TSFN does not hold a strong event-loop
+/// reference — the process exits freely once the event loop drains. This function
+/// exists for API compatibility; it is a no-op in napi-rs v3.
+///
+/// In napi v3, External parameters are received as `&External<T>` (borrowed from JS heap).
 #[napi]
-pub fn release_bridge(env: Env, bridge: External<Arc<BridgeFn>>) -> Result<()> {
-    let bridge_fn: &Arc<BridgeFn> = &bridge;
-    if let Ok(mut tsfn) = bridge_fn.tsfn.lock() {
-        let _ = tsfn.unref(&env);
-    }
+pub fn release_bridge(_bridge: &External<Arc<BridgeFn>>) -> Result<()> {
+    // No-op: the TSFN was built with weak::<true>() and does not hold the event loop open.
+    // The TSFN is released when the External<Arc<BridgeFn>> is GC'd by the JS runtime.
     Ok(())
 }
-
-// ─── NAPI export: get_result_from_js ────────────────────────────────────────
-
-/// Called from the JS side of the TSFN after the user's transform completes.
-///
-/// The JS wrapper (`js/index.ts`) wraps the user callback so that when the
-/// transform returns (sync or async), it calls this function to route the
-/// result back to the blocked worker thread via the channel stored in the payload.
-///
-/// This avoids the complexity of routing Promise resolution back through Rust.
-/// Instead: the TSFN callback returns void; a separate JS→Rust call delivers
-/// the result. The payload's `tx` sender is stored on a global WeakMap keyed
-/// by call ID.
-///
-/// **Implementation note:** The simpler single-round-trip approach below stores
-/// the SyncSender inside the BridgePayload which is passed to the TSFN. The JS
-/// callback is expected to call `sendBridgeResult(callId, result)` synchronously
-/// (or after awaiting the user fn). We implement this with call_with_return_value
-/// in the dispatch function instead.
-#[allow(dead_code)]
-fn _placeholder() {}
 
 // ─── extern "C" hook: bun_js_bridge_dispatch ────────────────────────────────
 
@@ -198,9 +188,9 @@ fn dispatch_inner(
     // SAFETY: The pointer was created by External::new(Arc::new(BridgeFn {...}))
     // in create_bridge(); it is kept alive by the JS External object. No other
     // invocation holds a mutable reference to it.
-    // napi v2 External<T> stores data as *mut TaggedObject<T> (with a type tag).
+    // napi v3 External<T> stores data as *mut External<T> (with a TypeId tag).
     // We must use External::<Arc<BridgeFn>>::inner_from_raw(ptr) to read through
-    // the TaggedObject wrapper correctly. Direct casting segfaults.
+    // the wrapper correctly. Direct casting segfaults.
     let bridge: &Arc<BridgeFn> = match unsafe {
         handle.external(|ptr: *mut c_void| -> Option<&Arc<BridgeFn>> {
             External::<Arc<BridgeFn>>::inner_from_raw(ptr)
@@ -222,39 +212,61 @@ fn dispatch_inner(
     // the user's function returns). rx blocks this worker thread until the result arrives.
     let (tx, rx) = mpsc::sync_channel::<String>(0);
 
-    // call_with_return_value<JsUnknown, _>:
-    //   1. Posts BridgePayload to the TSFN → the closure runs on the JS thread,
-    //      converting it into JS call args (source: string, path: string).
-    //   2. napi-rs calls the user's JS function with those args.
-    //   3. `cb` is called on the JS thread with the JS return value (JsUnknown).
-    //   4. `cb` coerces the return to a UTF-8 string and sends it through the channel.
+    // call_with_return_value in napi-rs v3:
+    //   1. Posts (source, path) tuple to the TSFN → build_callback spreads it into two
+    //      positional JS call args: fn(source, path).
+    //   2. napi-rs calls the JS callback. Return = Unknown (accepts String or Promise).
+    //   3. Closure is called on the JS thread with Result<Unknown>:
+    //      Ok(String)  → sync function; extract and send through the channel.
+    //      Ok(Promise) → async function; wire .then()/.catch() so the result reaches
+    //                    the blocked worker thread after microtask resolution.
+    //      Err(e)      → JS threw; fall back to original source.
     //
-    // Lock the Mutex to access the TSFN. Since we hold the lock only briefly
-    // (just to enqueue the call), this doesn't create long-lived contention.
-    let tsfn_guard = match bridge.tsfn.lock() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("[bun-js-beforeparse] Mutex poisoned: {e}");
-            return;
-        }
-    };
-
-    // CalleeHandled variant: call_with_return_value takes Result<T>.
-    // NOTE: CalleeHandled prepends null as the first JS arg (Node.js error-first convention).
-    // The JS wrapper in index.ts wraps the user callback to skip that first arg.
-    tsfn_guard.call_with_return_value(
-        Ok(BridgePayload { source, path }),
+    // v3 TSFN is Send+Sync; call_with_return_value takes &self — no Mutex needed.
+    // callee_handled=false → pass the tuple directly (no Result/Ok() wrapping).
+    bridge.tsfn.call_with_return_value(
+        (source, path),
         ThreadsafeFunctionCallMode::Blocking,
-        move |js_result: JsUnknown| -> napi::Result<()> {
-            // Clean idiomatic chain: JsUnknown → JsString → JsStringUtf8 → String
-            let result = js_result
-                .coerce_to_string()
-                .and_then(|js_str| js_str.into_utf8())
-                .and_then(|utf8| utf8.into_owned());
-            match result {
-                Ok(s) => { let _ = tx.send(s); }
+        // Return type is Unknown<'static> so both sync (String) and async (Promise)
+        // returns are accepted. We inspect the type at runtime and branch accordingly.
+        move |ret: Result<Unknown<'static>, napi::Status>, _env: Env| -> Result<()> {
+            match ret {
+                Ok(value) => {
+                    let value_type = value.get_type()?;
+                    if value_type == ValueType::String {
+                        // Sync path — extract the string and send it directly.
+                        let s: String = unsafe { value.cast::<napi::JsString>()? }
+                                .into_utf8()?
+                                .as_str()?
+                                .to_string();
+                        let _ = tx.send(s);
+                    } else {
+                        // Async path — the JS function returned a Promise.
+                        // Use PromiseRaw to wire up .then()/.catch() so the resolved
+                        // value reaches the channel after microtask resolution.
+                        // (CPU-only async is safe; event-loop-bound async will deadlock.)
+                        let tx_resolve = tx.clone();
+                        let tx_reject = tx.clone();
+                        let promise: PromiseRaw<'_, String> = unsafe { value.cast()? };
+                        if let Err(e) = promise
+                            .then(move |ctx: CallbackContext<String>| {
+                                let _ = tx_resolve.send(ctx.value);
+                                Ok(())
+                            })
+                            .and_then(|p| {
+                                p.catch(move |_ctx: CallbackContext<Unknown>| {
+                                    let _ = tx_reject.send(String::new());
+                                    Ok(())
+                                })
+                            })
+                        {
+                            eprintln!("[bun-js-beforeparse] Failed to wire promise callbacks: {e}");
+                            let _ = tx.send(String::new());
+                        }
+                    }
+                }
                 Err(e) => {
-                    eprintln!("[bun-js-beforeparse] JS transform return coercion failed: {e}");
+                    eprintln!("[bun-js-beforeparse] JS transform failed: {e}");
                     let _ = tx.send(String::new()); // empty = keep original source
                 }
             }
@@ -268,10 +280,10 @@ fn dispatch_inner(
             handle.set_output_source_code(transformed, loader);
         }
         Ok(_) => {
-            // Empty string = JS coercion failed — leave handle unchanged (original source).
+            // Empty string = JS threw or non-string return — leave handle unchanged (original source).
         }
         Err(_) => {
-            // Channel disconnected — JS threw or TSFN was dropped.
+            // Channel disconnected — TSFN was aborted/dropped before result was sent.
             eprintln!("[bun-js-beforeparse] channel disconnected before result was sent");
         }
     }

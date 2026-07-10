@@ -98,10 +98,12 @@ export interface NativePluginDescriptor {
  * ```
  */
 export function jsBridge(fn: TransformFn): NativePluginDescriptor {
-  // napi-rs CalleeHandled TSFN prepends a null "error" arg (Node.js error-first convention):
-  // the native hook calls callback(null, source, path). We wrap fn to skip that first null
-  // so the user's TransformFn cleanly receives (source, path).
-  const wrappedFn = (_err: null, source: string, path: string) => fn(source, path);
+  // napi-rs v3: the native module receives a Function<(String, String), String> and
+  // at runtime calls it with (source, path) as two separate positional args via FnArgs.
+  // However, the generated TS binding types the callback as (arg: [string, string]).
+  // We adapt: wrap fn so the raw two-arg call routes to fn(source, path) cleanly.
+  // Using a spread so any arity the runtime uses is handled safely.
+  const wrappedFn = (source: string, path: string) => fn(source, path);
 
   // createBridge() registers the wrapper as a ThreadsafeFunction inside the native module
   // and returns an External pointer (opaque to JS). The extern "C" hook finds the TSFN

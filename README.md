@@ -87,7 +87,8 @@ function jsBridge(fn: TransformFn): NativePluginDescriptor
 ```
 
 - **`fn`** — Your transform. Receives `(source: string, path: string)` and must return
-  the (possibly modified) source as a `string` or `Promise<string>`.
+  the (possibly modified) source as a `string` (sync) or `Promise<string>` (async).
+  CPU-only async is safe; see [the constraint](#constraint-no-event-loop-bound-async).
 - **Returns** the descriptor object `{ napiModule, symbol, external }` expected by
   `build.onBeforeParse(matcher, HERE)`.
 
@@ -95,6 +96,9 @@ function jsBridge(fn: TransformFn): NativePluginDescriptor
 
 Releases the TSFN reference so the event loop can exit after a `Bun.build()` call.
 Not needed when using `Bun.serve()` (the server keeps the event loop alive anyway).
+
+With `Weak = true` (napi-rs v3) this is a no-op for API compatibility — the TSFN does
+not hold the event loop open. Calling it is still safe and has no effect.
 
 ```ts
 function releaseBridge(descriptor: NativePluginDescriptor): void
@@ -131,10 +135,10 @@ Bun worker thread (native)           JS main thread
 bun_js_bridge_dispatch()             TSFN callback fires
   OnBeforeParse::from_raw()            call_with_return_value cb
   read source bytes (zero-copy)        calls user's JS fn(source, path)
-  create SyncChannel(0)                user fn returns/resolves string
-  tsfn.call_with_return_value(         coerce_to_string → send through channel
-    payload, Blocking, cb)           ─────────────────────────────────────────
-  ←─── blocks on rx.recv() ──────────── tx.send(transformed_source)
+  create SyncChannel(0)                user fn returns a value
+  tsfn.call_with_return_value(         ┌─ String   → tx.send(s) directly
+    payload, Blocking, cb)             │─ Promise  → .then(s => tx.send(s))
+  ←─── blocks on rx.recv() ────────────┘                       .catch(_ => tx.send(""))
   handle.set_output_source_code()
 ```
 
@@ -142,17 +146,28 @@ Key design decisions:
 
 - **`mpsc::sync_channel(0)`** — a rendezvous channel. `send()` blocks until `recv()`
   picks up, so the worker thread blocks exactly until the JS result is ready.
-- **`Mutex<ThreadsafeFunction>`** — the TSFN itself needs `&mut self` for `unref()`, so
-  it is wrapped in a `Mutex`. Concurrent worker threads share it via `Arc`.
-- **`CalleeHandled` TSFN strategy** — napi-rs's default. It prepends a null "error" arg
-  following Node.js error-first callback convention: `callback(null, source, path)`. The
-  `jsBridge()` wrapper automatically skips that first null, so `TransformFn` cleanly
-  receives `(source, path)`.
-- **`External::<Arc<BridgeFn>>::inner_from_raw(ptr)`** — napi v2 `External<T>` wraps
+- **`Unknown<'static>` TSFN return type** — the callback return type is intentionally
+  left loose so the runtime accepts both `String` (sync transform) and `Promise<String>`
+  (async transform). The dispatch hook inspects the value via `value.get_type()` and
+  branches: a `String` is sent through the channel directly; a `Promise` is cast to
+  `PromiseRaw<String>` and wired with `.then()` / `.catch()` so the resolved value
+  reaches the blocked worker thread after microtask resolution.
+- **`callee_handled = false`** — the JS callback is invoked as `fn(source, path)`
+  directly, with no null error-first arg prepended. `jsBridge()` passes the user's
+  `TransformFn` through unchanged, so `(source, path)` is what you actually receive.
+- **`Weak = true` TSFN reference** — does not hold the event loop open by itself; the
+  process exits naturally once the event loop drains. `releaseBridge()` is retained
+  for API compatibility but is a no-op in napi-rs v3.
+- **`External::<Arc<BridgeFn>>::inner_from_raw(ptr)`** — napi v3 `External<T>` wraps
   data in a `TaggedObject<T>` struct, not a bare `*mut T`. Direct casting would segfault;
   `inner_from_raw` navigates the wrapper correctly.
 - **`catch_unwind` in the `extern "C" hook`** — prevents a Rust panic from crashing the
   Bun runtime. On panic the original source is returned unchanged.
+
+> napi-rs v3 note: the generated `index.d.ts` types the callback as
+> `(arg: [string, string]) => unknown`, but at runtime `FnArgs<(String, String)>`
+> spreads the tuple into two positional JS args — `fn(source, path)`. The `jsBridge()`
+> wrapper insulates users from this discrepancy.
 
 ## Building from source
 

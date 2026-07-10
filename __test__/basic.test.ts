@@ -10,8 +10,9 @@
  * to actually call the native hook — tested manually via the POC.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { createRequire } from "module";
+import { writeFileSync, mkdirSync, rmSync } from "fs";
 
 const _require = createRequire(import.meta.url);
 
@@ -55,7 +56,7 @@ describe("native module", () => {
 });
 
 // Import at module level (top-level await works in ESM / Bun test runner)
-import { jsBridge } from "../js/index.ts";
+import { jsBridge, releaseBridge } from "../js/index.ts";
 
 describe("jsBridge() TypeScript wrapper", () => {
 
@@ -73,4 +74,199 @@ describe("jsBridge() TypeScript wrapper", () => {
     });
     expect(descriptor.symbol).toBe("bun_js_bridge_dispatch");
   });
+});
+
+// ─── Helper: create a temp entry file and build with onBeforeParse ───────────
+
+const TMP_DIR = "/tmp/bun-js-beforeparse-test";
+
+function createTmpFile(name: string, content: string): string {
+  mkdirSync(TMP_DIR, { recursive: true });
+  const filePath = `${TMP_DIR}/${name}`;
+  writeFileSync(filePath, content);
+  return filePath;
+}
+
+async function buildWithBridge(
+  entryContent: string,
+  entryName: string,
+  transform: (source: string, path: string) => string | Promise<string>,
+  filter: RegExp = /\.ts$/,
+) {
+  const entryPath = createTmpFile(entryName, entryContent);
+  const result = await Bun.build({
+    entrypoints: [entryPath],
+    target: "browser",
+    plugins: [
+      {
+        name: "test-bridge",
+        setup(build) {
+          build.onBeforeParse(
+            { filter, namespace: "file" },
+            jsBridge(transform),
+          );
+        },
+      },
+    ],
+  });
+  return result;
+}
+
+// ─── Warmup: first Bun.build() with onBeforeParse needs native init ──────────
+// Without this, the first real test silently gets the original source back
+// because the native plugin system hasn't finished initializing yet.
+
+beforeAll(async () => {
+  const warmupPath = createTmpFile("_warmup.ts", "export const warmup = true;");
+  await Bun.build({
+    entrypoints: [warmupPath],
+    target: "browser",
+    plugins: [
+      {
+        name: "warmup-bridge",
+        setup(build) {
+          build.onBeforeParse(
+            { filter: /\.ts$/, namespace: "file" },
+            jsBridge((source) => `// warmup\n${source}`),
+          );
+        },
+      },
+    ],
+  });
+});
+
+// ─── Sync transform tests ────────────────────────────────────────────────────
+
+describe("jsBridge sync transform", () => {
+  test("transforms source through Bun.build and output contains result", async () => {
+    const sentinel = "SYNC_TRANSFORM_ACTIVE";
+    const result = await buildWithBridge(
+      `export const marker = "PLACEHOLDER";`,
+      "sync-test.ts",
+      // Modify an exported value so Bun's tree-shaker keeps the result.
+      // Prepended unused vars and // comments are stripped by the bundler.
+      (source) => source.replace("PLACEHOLDER", sentinel),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.outputs.length).toBeGreaterThan(0);
+
+    const bundle = await result.outputs[0].text();
+    expect(bundle).toContain(sentinel);
+    expect(bundle).not.toContain("PLACEHOLDER");
+  });
+
+  test("receives correct source and path arguments", async () => {
+    let receivedPath = "";
+    const result = await buildWithBridge(
+      `export const val = "hello";`,
+      "path-test.ts",
+      (source, path) => {
+        receivedPath = path;
+        return source;
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(receivedPath).toContain("path-test.ts");
+  });
+
+  test("can modify source content (uppercase transform)", async () => {
+    const result = await buildWithBridge(
+      `export const msg = "lowercase";`,
+      "case-test.ts",
+      (source) => source.replace("lowercase", "UPPERCASE"),
+    );
+
+    expect(result.success).toBe(true);
+    const bundle = await result.outputs[0].text();
+    expect(bundle).toContain("UPPERCASE");
+    expect(bundle).not.toContain("lowercase");
+  });
+
+  test("transform returning empty string does not corrupt output (native falls back to original)", async () => {
+    const original = `export const keep = 42;`;
+    const result = await buildWithBridge(
+      original,
+      "empty-test.ts",
+      () => "",
+    );
+
+    expect(result.success).toBe(true);
+    const bundle = await result.outputs[0].text();
+    expect(bundle).toContain("keep");
+  });
+});
+
+// ─── Async transform tests ───────────────────────────────────────────────────
+
+describe("jsBridge async transform", () => {
+  test("transforms source through Bun.build with async function", async () => {
+    const sentinel = "ASYNC_TRANSFORM_ACTIVE";
+    const result = await buildWithBridge(
+      `export const marker = "PLACEHOLDER";`,
+      "async-test.ts",
+      async (source) => {
+        // Simulate CPU-only async work (microtask resolution — safe for bridge)
+        await Promise.resolve();
+        // Modify an exported value so Bun's tree-shaker keeps the result.
+        return source.replace("PLACEHOLDER", sentinel);
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.outputs.length).toBeGreaterThan(0);
+
+    const bundle = await result.outputs[0].text();
+    expect(bundle).toContain(sentinel);
+    expect(bundle).not.toContain("PLACEHOLDER");
+  });
+
+  test("async transform receives correct source and path", async () => {
+    let receivedSource = "";
+    let receivedPath = "";
+    const result = await buildWithBridge(
+      `export const data = 99;`,
+      "async-args-test.ts",
+      async (source, path) => {
+        receivedSource = source;
+        receivedPath = path;
+        await Promise.resolve();
+        return source;
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(receivedSource).toContain("data = 99");
+    expect(receivedPath).toContain("async-args-test.ts");
+  });
+
+  test("async transform with chained microtasks resolves correctly", async () => {
+    const result = await buildWithBridge(
+      `export const msg = "original";`,
+      "async-chain-test.ts",
+      async (source) => {
+        const a = await Promise.resolve("FIRST");
+        const b = await Promise.resolve("SECOND");
+        // In-place replacement survives Bun's comment stripping.
+        return source.replace("original", `${a}_${b}`);
+      },
+    );
+
+    expect(result.success).toBe(true);
+    const bundle = await result.outputs[0].text();
+    expect(bundle).toContain("FIRST_SECOND");
+    expect(bundle).not.toContain("original");
+  });
+});
+
+// ─── Cleanup ─────────────────────────────────────────────────────────────────
+
+test("cleanup temp files", () => {
+  try {
+    rmSync(TMP_DIR, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+  expect(true).toBe(true);
 });

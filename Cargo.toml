@@ -11,11 +11,11 @@ crate-type = ["cdylib"]
 # Bun's safe Rust wrapper over the onBeforeParse C ABI structs
 bun-native-plugin = "0.2"
 
-# napi-rs v2: well-documented TSFN API (ErrorStrategy, ThreadSafeCallContext)
-# napi4: enables ThreadsafeFunction
+# napi-rs v3: ThreadsafeFunction built via Function::build_threadsafe_function() builder.
+# napi4: enables ThreadsafeFunction (default in v3, listed explicitly for clarity)
 # napi6: External type support
-napi = { version = "2", features = ["napi4", "napi6"] }
-napi-derive = "2"
+napi = { version = "3", features = ["napi4", "napi6"] }
+napi-derive = "3"
 
 [build-dependencies]
 # Generates the correct linker flags for the .node shared library
