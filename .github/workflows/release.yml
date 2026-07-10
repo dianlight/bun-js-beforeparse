@@ -160,9 +160,17 @@ jobs:
         run: bunx napi create-npm-dirs
 
       # napi pre-publish handles: version updates, optionalDependencies,
-      # copying .node files to stub dirs, and publishing all packages.
-      - name: Prepare and publish platform packages (napi pre-publish)
+      # copying .node files to stub dirs, and publishing all platform stub packages.
+      - name: Publish platform stub packages (napi pre-publish)
         run: bunx napi pre-publish --no-gh-release --tag-style npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # napi pre-publish does NOT publish the root package — only the
+      # platform stubs. Publish it explicitly so the base package on npm
+      # is updated to the new version.
+      - name: Publish root package to npm
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
